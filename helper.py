@@ -26,22 +26,105 @@ colors = ['r', 'g', 'b', 'c', 'k', 'y','m', 'c']
 
 
 #####################################
+# Dataloader : ReTouch
+# Purpose : for multi classes
+#####################################
+
+
+class retouch(Dataset):
+    def __init__(self, data_path, train=False, \
+                IMAGE_SIZE=(224,224), CROP_SIZE=(200,200), num_class = 3, noisy=False):
+        self.data = data_path
+        self.train = train
+        self.IMAGE_SIZE = IMAGE_SIZE
+        self.CROP_SIZE = CROP_SIZE
+        self.NUM_CLASS = num_class
+        self.noisy = noisy
+
+    def transform(self, image, mask, train):
+        resize_image = Resize(self.IMAGE_SIZE) 
+        resize_label = Resize(self.IMAGE_SIZE,  interpolation=TF.InterpolationMode.NEAREST)
+        
+        image = resize_image(image)
+        mask = resize_label(mask)
+        
+        if train:
+            # Random crop
+            i, j, h, w = RandomCrop.get_params(
+                image, output_size=(self.CROP_SIZE))
+            image = TF.crop(image, i, j, h, w)
+            mask = TF.crop(mask, i, j, h, w)
+            # Random horizontal flipping
+            if random.random() > 0.5:
+                image = TF.hflip(image)
+                mask = TF.hflip(mask)
+        # Transform to tensor
+        image = TF.to_tensor(image)
+        norm_ = torchvision.transforms.Normalize(mean=[0.456], std=[0.224])
+        image = norm_(image)
+        
+        mask = np.array(mask)
+        mask_image_label = np.unique(mask)
+        mask = torch.as_tensor(mask, dtype=torch.int64)
+        mask = torch.stack([mask==i for i in range(1,self.NUM_CLASS+1)]).type(torch.float)
+        return image, mask, mask_image_label
+        
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        data, label = self.data[idx]
+        image = Image.open(data).convert('L')
+        mask = Image.open(label)
+        x, y, image_label = self.transform(image, mask, self.train)
+        # generate bbox mask #####################################
+        bbox_mask = torch.zeros(y.shape)
+        image_mask = torch.zeros(y.shape)
+        
+        for item in image_label:
+            if item  == 0: #  ignore background
+                continue
+            tar_interest = copy.deepcopy(y[item-1])
+            w, h = torch.where(tar_interest == 1)
+            if self.noisy:
+                margin = torch.randint(0, 10, (4,))
+            else:
+                margin = torch.zeros((4,))
+            w_min, w_max, h_min, h_max = torch.min(w)-margin[0], \
+            torch.max(w)+margin[1], \
+            torch.min(h)-margin[2], \
+            torch.max(h)+margin[3]
+            w_min = torch.clamp(w_min, min=0, max=self.CROP_SIZE[0]).int()
+            w_max = torch.clamp(w_max, min=0, max=self.CROP_SIZE[0]).int()
+            h_min = torch.clamp(h_min, min=0, max=self.CROP_SIZE[0]).int()
+            h_max = torch.clamp(h_max, min=0, max=self.CROP_SIZE[0]).int()
+            bbox_mask[item-1, w_min:w_max, h_min:h_max] = 1
+            image_mask[item-1] = 1
+            
+        return x, y, bbox_mask, image_mask
+    
+
+
+#####################################
 # Dataloader : Cancer
-# Purpose : overall training data
+# Purpose : overall training data single class
 #####################################
 class Cancer(Dataset):
     def __init__(self, im_path, mask_path, train=False, \
-                IMAGE_SIZE=(256,256), CROP_SIZE=(224,224)):
+                IMAGE_SIZE=(256,256), CROP_SIZE=(224,224), 
+                noisy=False):
         self.data = im_path
         self.label = mask_path
         self.train = train
         self.IMAGE_SIZE = IMAGE_SIZE
         self.CROP_SIZE = CROP_SIZE
+        self.noisy = noisy
 
     def transform(self, image, mask, train):
-        resize = Resize(self.IMAGE_SIZE)
-        image = resize(image)
-        mask = resize(mask)
+        resize_image = Resize(self.IMAGE_SIZE)
+        resize_label = Resize(self.IMAGE_SIZE, interpolation=TF.InterpolationMode.NEAREST)
+        image = resize_image(image)
+        mask = resize_label(mask)
         if train:
             # Random crop
             i, j, h, w = RandomCrop.get_params(
@@ -71,10 +154,21 @@ class Cancer(Dataset):
         ##########################################################
         # generate bbox mask #####################################
         bbox_mask = torch.zeros(y.shape)
-        # if normal images no bbox / black # 
         if torch.sum(y) > 0:
-            _, w, h = torch.where(y >= 0.5)
-            w_min, w_max, h_min, h_max = torch.min(w), torch.max(w), torch.min(h), torch.max(h)
+            _, w, h = torch.where(y == 1)
+            # should be within the image size, eg 0-224
+            if self.noisy:
+                margin = torch.randint(0, 10, (4,))
+            else:
+                margin = torch.zeros((4,))
+            w_min, w_max, h_min, h_max = torch.min(w)-margin[0], \
+            torch.max(w)+margin[1], \
+            torch.min(h)-margin[2], \
+            torch.max(h)+margin[3]
+            w_min = torch.clamp(w_min, min=0, max=224).int()
+            w_max = torch.clamp(w_max, min=0, max=224).int()
+            h_min = torch.clamp(h_min, min=0, max=224).int()
+            h_max = torch.clamp(h_max, min=0, max=224).int()
             bbox_mask[:, w_min:w_max, h_min:h_max] = 1
         return x, y, bbox_mask
 
@@ -238,7 +332,7 @@ if FedST, we augment the image and use crossentropy
 
 def train_model(trainloader, net_stu, optimizer_stu, \
                      device, acc=None, loss = None, supervision_type='labeled', \
-                     FedST=False, CE_LOSS= None, FedMix_network=1):
+                     warmup=False, CE_LOSS= None, FedMix_network=1):
     net_stu.train()
     t_loss, t_acc = 0,0    
     labeled_len = len(trainloader)
@@ -256,7 +350,7 @@ def train_model(trainloader, net_stu, optimizer_stu, \
             l_stu = (1 - dice_coeff(masks_stu, masks.type(torch.float)))[0]
             l_ = l_stu
         else:
-            if FedST:
+            if warmup: # FedST and FedRGD
                 CE_LOSS = CE_LOSS.to(device) 
                 # to augment #
                 gamma_v = (torch.rand(1)*2)
@@ -271,7 +365,7 @@ def train_model(trainloader, net_stu, optimizer_stu, \
                 l_stu = CE_LOSS(masks_augmented[mask], masks_stu[mask])
                 l_ = l_stu
 
-            else: # for non FedST
+            else: # for non warmup based
                 if FedMix_network == 1:
                     masks_teach = y_pl.to(device)
                 else:
