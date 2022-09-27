@@ -34,13 +34,15 @@ colors = ['r', 'g', 'b', 'c', 'k', 'y','m', 'c']
 
 class retouch(Dataset):
     def __init__(self, data_path, train=False, \
-                IMAGE_SIZE=(224,224), CROP_SIZE=(200,200), num_class = 3, noisy=True):
+                IMAGE_SIZE=(224,224), CROP_SIZE=(200,200), num_class = 3, \
+                noisy=True, augment_intensity=False):
         self.data = data_path
         self.train = train
         self.IMAGE_SIZE = IMAGE_SIZE
         self.CROP_SIZE = CROP_SIZE
         self.NUM_CLASS = num_class
         self.noisy = noisy
+        self.augment_intensity=True
 
     def transform(self, image, mask, train):
         resize_image = Resize(self.IMAGE_SIZE) 
@@ -61,8 +63,6 @@ class retouch(Dataset):
                 mask = TF.hflip(mask)
         # Transform to tensor
         image = TF.to_tensor(image)
-        norm_ = torchvision.transforms.Normalize(mean=[0.456], std=[0.224])
-        image = norm_(image)
         
         mask = np.array(mask)
         mask_image_label = np.unique(mask)
@@ -535,6 +535,7 @@ def train_model_multiclasses(trainloader, net_stu, optimizer_stu, \
                 masks_stu = (masks_stu.detach() > 0.5).float()
 
                 masks_augmented = torch.sigmoid(net_stu(imgs_augmented))
+                masks_augmented = torch.clamp(masks_augmented, min=0, max=1)
                 l_stu = CE_LOSS(masks_augmented[mask], masks_stu[mask])
                 l_ = l_stu
 
