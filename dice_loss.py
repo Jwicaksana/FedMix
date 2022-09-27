@@ -8,7 +8,7 @@ class DiceCoeff(Function):
     def forward(self, input, target):
         self.save_for_backward(input, target)
         eps = 0.0001
-        self.inter = torch.dot(input.view(-1), target.view(-1))
+        self.inter = torch.dot(input.reshape(-1), target.reshape(-1))
         self.union = torch.sum(input) + torch.sum(target) + eps
 
         t = (2 * self.inter.float() + eps) / self.union.float()
@@ -32,12 +32,11 @@ class DiceCoeff(Function):
 def dice_coeff(input, target):
     """Dice coeff for batches"""
     if input.is_cuda:
-        s = torch.FloatTensor(1).zero_().to(input.device)
+        s = torch.FloatTensor(1).cuda().zero_()
     else:
         s = torch.FloatTensor(1).zero_()
 
-    length = 0
     for i, c in enumerate(zip(input, target)):
         s = s + DiceCoeff().forward(c[0], c[1])
-        length = i
-    return s / (length + 1)
+
+    return s / (i + 1)
